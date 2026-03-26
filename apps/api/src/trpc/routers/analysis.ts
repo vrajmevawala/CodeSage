@@ -15,6 +15,7 @@ export const analysisRouter = t.router({
         filename: z.string().min(1).max(512),
         language: z.enum(['typescript', 'javascript', 'python', 'go', 'rust', 'java', 'cpp', 'csharp']),
         contentSize: z.number().min(1).max(500_000),
+        sourceCode: z.string().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -46,6 +47,7 @@ export const analysisRouter = t.router({
           language: input.language,
           status: 'pending',
           creditsCharged: creditsRequired,
+          metadata: { sourceCode: input.sourceCode },
         })
         .returning({ id: analyses.id });
 
@@ -91,10 +93,18 @@ export const analysisRouter = t.router({
         .set({ status: 'processing', updatedAt: new Date() })
         .where(eq(analyses.id, input.analysisId));
 
-      await enqueueAnalysis({
-        analysisId: input.analysisId,
-        workspaceId: ctx.workspaceId!,
-      });
+      try {
+        await enqueueAnalysis({
+          analysisId: input.analysisId,
+          workspaceId: ctx.workspaceId!,
+        });
+      } catch (err) {
+        console.error("[Redis] Failed to enqueue analysis:", err);
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to queue analysis. Please ensure Redis is running.',
+        });
+      }
 
       await insertAuditLog(ctx, {
         action: 'analysis.started',

@@ -14,6 +14,8 @@ export type Context = {
 };
 
 async function syncUser(clerkUserId: string): Promise<NonNullable<Context["user"]> | null> {
+  let user: NonNullable<Context["user"]>;
+  
   const [existing] = await db
     .select({ id: users.id, clerkId: users.clerkId, plan: users.plan })
     .from(users)
@@ -21,37 +23,48 @@ async function syncUser(clerkUserId: string): Promise<NonNullable<Context["user"
     .limit(1);
 
   if (existing) {
-    return existing;
+    user = existing;
+  } else {
+    console.log(`[Auth] Provisioning new user for Clerk ID: ${clerkUserId}`);
+    const [newUser] = await db
+      .insert(users)
+      .values({
+        clerkId: clerkUserId,
+        email: `sync_${clerkUserId}@codeopt.dev`,
+        name: "New User",
+      })
+      .returning({ id: users.id, clerkId: users.clerkId, plan: users.plan });
+    user = newUser;
   }
 
-  console.log(`[Auth] Provisioning new user for Clerk ID: ${clerkUserId}`);
-  const [newUser] = await db
-    .insert(users)
-    .values({
-      clerkId: clerkUserId,
-      email: `sync_${clerkUserId}@codeopt.dev`,
-      name: "New User",
-    })
-    .returning({ id: users.id, clerkId: users.clerkId, plan: users.plan });
+  // Ensure user has at least one workspace
+  const [firstMembership] = await db
+    .select({ workspaceId: teamMembers.workspaceId })
+    .from(teamMembers)
+    .where(eq(teamMembers.userId, user.id))
+    .limit(1);
 
-  const [workspace] = await db
-    .insert(workspaces)
-    .values({
-      name: "My Workspace",
-      slug: `workspace-${newUser.id.slice(0, 8)}`,
-      ownerId: newUser.id,
-    })
-    .returning({ id: workspaces.id });
+  if (!firstMembership) {
+    console.log(`[Auth] User ${user.id} has no workspace. Provisioning one...`);
+    const [workspace] = await db
+      .insert(workspaces)
+      .values({
+        name: "My Workspace",
+        slug: `workspace-${user.id.slice(0, 8)}`,
+        ownerId: user.id,
+      })
+      .returning({ id: workspaces.id });
 
-  await db.insert(teamMembers).values({
-    workspaceId: workspace.id,
-    userId: newUser.id,
-    role: "owner",
-    status: "active",
-    joinedAt: new Date(),
-  });
+    await db.insert(teamMembers).values({
+      workspaceId: workspace.id,
+      userId: user.id,
+      role: "owner",
+      status: "active",
+      joinedAt: new Date(),
+    });
+  }
 
-  return newUser;
+  return user;
 }
 
 export async function createContext({ req, res }: { req: FastifyRequest; res: FastifyReply }): Promise<Context> {

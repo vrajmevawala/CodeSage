@@ -13,7 +13,9 @@
     "@anthropic-ai/sdk": "^0.60.0",
     "@codeopt/db": "workspace:*",
     "bullmq": "^5.48.0",
+    "dotenv": "^16.4.5",
     "drizzle-orm": "^0.37.0",
+    "groq-sdk": "^1.1.2",
     "ioredis": "^5.3.2"
   },
   "devDependencies": {

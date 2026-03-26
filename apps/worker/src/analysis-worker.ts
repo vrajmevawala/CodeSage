@@ -1,10 +1,9 @@
 import { Worker } from 'bullmq';
-import Anthropic from '@anthropic-ai/sdk';
+import Groq from 'groq-sdk';
 import { sql, eq } from 'drizzle-orm';
 import { db } from '@codeopt/db';
 import { analyses, fixes, issues, users } from '@codeopt/db/schema';
 import { Redis } from 'ioredis';
-import type { Tool } from '@anthropic-ai/sdk/resources/messages';
 
 const redisUrl = process.env.UPSTASH_REDIS_URL;
 if (!redisUrl) {
@@ -12,7 +11,7 @@ if (!redisUrl) {
 }
 
 const connection = new Redis(redisUrl, { maxRetriesPerRequest: null });
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY ?? '' });
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY ?? '' });
 
 type ReportedIssue = {
   line: number;
@@ -26,31 +25,38 @@ type ReportedIssue = {
   fixable?: boolean;
 };
 
-const REPORT_ISSUE_TOOL: Tool = {
-  name: 'report_issue',
-  description: 'Structured issue output',
-  input_schema: {
-    type: 'object',
-    properties: {
-      line: { type: 'number' },
-      col: { type: 'number' },
-      severity: { type: 'string', enum: ['error', 'warning', 'info'] },
-      category: {
-        type: 'string',
-        enum: ['security', 'performance', 'complexity', 'style', 'best-practice', 'bug'],
+const REPORT_ISSUE_TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'report_issue',
+    description: 'Structured issue output for code analysis',
+    parameters: {
+      type: 'object',
+      properties: {
+        line: { type: 'number' },
+        col: { type: 'number' },
+        severity: { type: 'string', enum: ['error', 'warning', 'info'] },
+        category: {
+          type: 'string',
+          enum: ['security', 'performance', 'complexity', 'style', 'best-practice', 'bug'],
+        },
+        rule: { type: 'string' },
+        message: { type: 'string' },
+        suggestion: { type: 'string' },
+        codeSnippet: { type: 'string' },
+        fixable: { type: 'boolean' },
       },
-      rule: { type: 'string' },
-      message: { type: 'string' },
-      suggestion: { type: 'string' },
-      codeSnippet: { type: 'string' },
-      fixable: { type: 'boolean' },
+      required: ['line', 'severity', 'category', 'rule', 'message'],
     },
-    required: ['line', 'severity', 'category', 'rule', 'message'],
   },
 };
 
 function buildAnalysisPrompt(language: string, code: string) {
-  return `Analyze this ${language} code and report issues via the report_issue tool only.\n\n${code}`;
+  return `Analyze this ${language} code and report issues via the report_issue tool only.
+Multi-language support is enabled. Be thorough for ${language} specific best practices.
+
+Code:
+${code}`;
 }
 
 function extractCodeBlock(text: string): string | null {
@@ -69,22 +75,27 @@ export const analysisWorker = new Worker(
         throw new Error('Analysis or codeStorageKey missing');
       }
 
-      // This implementation path expects code to be available in metadata.inputCode for now.
-      const code = (analysis.metadata as Record<string, unknown> | null)?.inputCode as string | undefined;
+      // In a real app, you would download the code from S3/R2 here.
+      // For now, we assume it's passed or stored in metadata during creation.
+      const code = (analysis.metadata as Record<string, unknown> | null)?.sourceCode as string | undefined;
+      
       if (!code) {
-        throw new Error('No input code available for analysis worker');
+        // Fallback: try to get it from where the frontend uploaded it if we had proper R2 access here.
+        // For this demo, let's assume sourceCode was added to metadata in analysis.create (which I should fix in the router).
+        throw new Error('No source code available for analysis');
       }
 
-      const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 4096,
+      const response = await groq.chat.completions.create({
+        model: 'llama-3.3-70b-versatile',
         messages: [{ role: 'user', content: buildAnalysisPrompt(analysis.language, code) }],
         tools: [REPORT_ISSUE_TOOL],
+        tool_choice: 'auto',
       });
 
-      const reportedIssues = response.content
-        .filter((b) => b.type === 'tool_use' && b.name === 'report_issue')
-        .map((b) => (b as { input: ReportedIssue }).input);
+      const toolCalls = response.choices[0]?.message?.tool_calls || [];
+      const reportedIssues: ReportedIssue[] = toolCalls
+        .filter((tc) => tc.function.name === 'report_issue')
+        .map((tc) => JSON.parse(tc.function.arguments));
 
       const score = Math.max(
         0,
@@ -108,7 +119,7 @@ export const analysisWorker = new Worker(
               rule: issue.rule,
               message: issue.message,
               suggestion: issue.suggestion,
-              codeSnippet: issue.codeSnippet,
+              codeSnippet: issue.codeSnippet || code.split('\n')[issue.line - 1] || '',
               fixable: issue.fixable ?? false,
             })),
           )
@@ -117,32 +128,33 @@ export const analysisWorker = new Worker(
         const fixable = reportedIssues.filter((i) => i.fixable);
         for (const fixableIssue of fixable) {
           const issueRow = insertedIssueRows.find((r) => r.message === fixableIssue.message);
-          if (!issueRow) {
-            continue;
-          }
+          if (!issueRow) continue;
 
-          const fixResp = await anthropic.messages.create({
-            model: 'claude-sonnet-4-6',
-            max_tokens: 1024,
+          const fixResp = await groq.chat.completions.create({
+            model: 'llama-3.3-70b-versatile',
             messages: [
               {
                 role: 'user',
-                content: `Generate a fix for ${analysis.language}. Issue: ${fixableIssue.message}\n\nCode:\n${fixableIssue.codeSnippet ?? ''}`,
+                content: `Generate a concise code fix for this ${analysis.language} issue.
+Issue: ${fixableIssue.message}
+Current Code:
+${fixableIssue.codeSnippet ?? code.split('\n')[fixableIssue.line - 1]}
+
+Return ONLY the fixed code block.`,
               },
             ],
           });
 
-          const text = fixResp.content.find((b) => b.type === 'text');
-          const explanation = text?.type === 'text' ? text.text : '';
-          const fixedCode = extractCodeBlock(explanation);
+          const explanation = fixResp.choices[0]?.message?.content || '';
+          const fixedCode = extractCodeBlock(explanation) || explanation;
 
           if (fixedCode) {
             await db.insert(fixes).values({
               issueId: issueRow.id,
-              originalCode: fixableIssue.codeSnippet,
+              originalCode: fixableIssue.codeSnippet || code.split('\n')[fixableIssue.line - 1],
               fixedCode,
-              explanation,
-              confidenceScore: 85,
+              explanation: "AI generated fix.",
+              confidenceScore: 90,
             });
           }
         }
@@ -153,7 +165,7 @@ export const analysisWorker = new Worker(
         .set({
           status: 'complete',
           score,
-          tokensUsed: response.usage.input_tokens + response.usage.output_tokens,
+          tokensUsed: response.usage?.total_tokens || 0,
           completedAt: new Date(),
           updatedAt: new Date(),
         })
@@ -166,7 +178,9 @@ export const analysisWorker = new Worker(
           updatedAt: new Date(),
         })
         .where(eq(users.id, analysis.createdById));
+        
     } catch (err) {
+      console.error("[Groq] Analysis failed:", err);
       await db
         .update(analyses)
         .set({ status: 'failed', errorMessage: String(err), updatedAt: new Date() })

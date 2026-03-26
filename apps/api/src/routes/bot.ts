@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
-import Anthropic from '@anthropic-ai/sdk';
+import Groq from 'groq-sdk';
 import { Redis } from '@upstash/redis';
 import { db } from '@codeopt/db';
 import { buildSystemPrompt } from '../bot/prompt.js';
@@ -8,8 +8,8 @@ import { verifyToken } from '@clerk/backend';
 import { and, eq } from 'drizzle-orm';
 import { teamMembers, users } from '@codeopt/db/schema';
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY ?? '',
+const groq = new Groq({
+  apiKey: process.env.GROQ_API_KEY ?? '',
 });
 
 const redis = new Redis({
@@ -19,6 +19,7 @@ const redis = new Redis({
 
 export const botRoute: FastifyPluginAsync = async (app) => {
   app.post('/chat', async (req, reply) => {
+    // ... (logic for token and user remains the same)
     const token = req.headers.authorization?.replace('Bearer ', '');
     if (!token) {
       return reply.status(401).send({ error: 'Unauthorized' });
@@ -83,72 +84,23 @@ export const botRoute: FastifyPluginAsync = async (app) => {
 
     let fullReply = '';
     try {
-      const stream = anthropic.messages.stream({
-        model: 'claude-sonnet-4-6',
+      const chatCompletion = await groq.chat.completions.create({
+        messages: [
+          { role: 'system', content: systemPrompt },
+          ...history,
+          { role: 'user', content: message }
+        ],
+        model: 'llama-3.3-70b-versatile',
+        temperature: 0.7,
         max_tokens: 1024,
-        system: systemPrompt,
-        messages: [...history, { role: 'user', content: message }] as never,
-        tools: BOT_TOOLS as any,
+        stream: true,
       });
 
-      for await (const event of stream) {
-        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-          const token = event.delta.text;
+      for await (const chunk of chatCompletion) {
+        const token = chunk.choices[0]?.delta?.content || '';
+        if (token) {
           fullReply += token;
           reply.raw.write(`data: ${JSON.stringify({ type: 'token', token })}\n\n`);
-        }
-
-        if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
-          reply.raw.write(
-            `data: ${JSON.stringify({ type: 'tool_start', name: event.content_block.name })}\n\n`,
-          );
-        }
-
-        if (event.type === 'message_delta' && event.delta.stop_reason === 'tool_use') {
-          const currentMessage = stream.currentMessage;
-          if (!currentMessage) {
-            continue;
-          }
-
-          const toolUses = currentMessage.content.filter((b) => b.type === 'tool_use');
-          const toolResults = await Promise.all(
-            toolUses.map(async (toolUse: any) => {
-              const result = await executeTool(toolUse.name, toolUse.input, {
-                userId: user.id,
-                workspaceId: workspaceId ?? '',
-                db,
-              });
-
-              reply.raw.write(
-                `data: ${JSON.stringify({ type: 'tool_result', name: toolUse.name, result })}\n\n`,
-              );
-
-              return {
-                type: 'tool_result' as const,
-                tool_use_id: toolUse.id,
-                content: JSON.stringify(result),
-              };
-            }),
-          );
-
-          const continuation = anthropic.messages.stream({
-            model: 'claude-sonnet-4-6',
-            max_tokens: 1024,
-            system: systemPrompt,
-            messages: [
-              ...history,
-              { role: 'user', content: message },
-              { role: 'assistant', content: currentMessage.content as never },
-              { role: 'user', content: toolResults as never },
-            ] as never,
-          });
-
-          for await (const e2 of continuation) {
-            if (e2.type === 'content_block_delta' && e2.delta.type === 'text_delta') {
-              fullReply += e2.delta.text;
-              reply.raw.write(`data: ${JSON.stringify({ type: 'token', token: e2.delta.text })}\n\n`);
-            }
-          }
         }
       }
 
@@ -161,7 +113,8 @@ export const botRoute: FastifyPluginAsync = async (app) => {
 
       reply.raw.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
       reply.raw.end();
-    } catch {
+    } catch (e) {
+      console.error("[Groq] Chat error:", e);
       reply.raw.write(`data: ${JSON.stringify({ type: 'error', message: 'AI service error' })}\n\n`);
       reply.raw.end();
     }
