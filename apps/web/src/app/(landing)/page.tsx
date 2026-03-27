@@ -19,7 +19,7 @@ const NAV_LINKS = ['Features', 'Pricing', 'Docs', 'Blog'];
 
 export default function LandingPage() {
   return (
-    <div style={{ minHeight: '100vh', background: 'var(--bg)', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ height: '100vh', overflowY: 'auto', background: 'var(--bg)', display: 'flex', flexDirection: 'column' }}>
       {/* Sticky header */}
       <header style={{
         position: 'sticky', top: 0, zIndex: 100,
