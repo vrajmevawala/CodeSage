@@ -51,9 +51,11 @@ html, body {
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  overflow: hidden; /* Prevent page-level scroll */
 }
 
-#root, body > div {
+/* Next.js root target */
+#__next, [data-nextjs-scroll-focus-boundary] {
   height: 100%;
 }
 
