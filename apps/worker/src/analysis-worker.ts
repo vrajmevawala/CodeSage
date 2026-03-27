@@ -4,6 +4,11 @@ import { sql, eq } from 'drizzle-orm';
 import { db } from '@codeopt/db';
 import { analyses, fixes, issues, users } from '@codeopt/db/schema';
 import { Redis } from 'ioredis';
+import { 
+  ANALYSIS_SYSTEM_PROMPT, 
+  buildAnalysisUserPrompt, 
+  buildFixPrompt 
+} from './prompts.js';
 
 const redisUrl = process.env.UPSTASH_REDIS_URL;
 if (!redisUrl) {
@@ -51,13 +56,7 @@ const REPORT_ISSUE_TOOL = {
   },
 };
 
-function buildAnalysisPrompt(language: string, code: string) {
-  return `Analyze this ${language} code and report issues via the report_issue tool only.
-Multi-language support is enabled. Be thorough for ${language} specific best practices.
-
-Code:
-${code}`;
-}
+// Removed buildAnalysisPrompt (moved to prompts.ts)
 
 function extractCodeBlock(text: string): string | null {
   const match = text.match(/```[a-zA-Z]*\n([\s\S]*?)```/);
@@ -87,7 +86,10 @@ export const analysisWorker = new Worker(
 
       const response = await groq.chat.completions.create({
         model: 'llama-3.3-70b-versatile',
-        messages: [{ role: 'user', content: buildAnalysisPrompt(analysis.language, code) }],
+        messages: [
+          { role: 'system', content: ANALYSIS_SYSTEM_PROMPT },
+          { role: 'user', content: buildAnalysisUserPrompt(analysis.language, code) }
+        ],
         tools: [REPORT_ISSUE_TOOL],
         tool_choice: 'auto',
       });
@@ -135,12 +137,7 @@ export const analysisWorker = new Worker(
             messages: [
               {
                 role: 'user',
-                content: `Generate a concise code fix for this ${analysis.language} issue.
-Issue: ${fixableIssue.message}
-Current Code:
-${fixableIssue.codeSnippet ?? code.split('\n')[fixableIssue.line - 1]}
-
-Return ONLY the fixed code block.`,
+                content: buildFixPrompt(analysis.language, fixableIssue.message, fixableIssue.codeSnippet ?? code.split('\n')[fixableIssue.line - 1]),
               },
             ],
           });
