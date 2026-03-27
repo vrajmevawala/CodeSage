@@ -23,14 +23,7 @@ interface Tab {
 }
 
 const LANGUAGES = [
-  { id: 'typescript', name: 'TypeScript', ext: 'ts' },
-  { id: 'javascript', name: 'JavaScript', ext: 'js' },
   { id: 'python', name: 'Python', ext: 'py' },
-  { id: 'go', name: 'Go', ext: 'go' },
-  { id: 'rust', name: 'Rust', ext: 'rs' },
-  { id: 'java', name: 'Java', ext: 'java' },
-  { id: 'cpp', name: 'C++', ext: 'cpp' },
-  { id: 'csharp', name: 'C#', ext: 'cs' },
 ];
 
 export default function AnalyzePage() {
@@ -106,9 +99,9 @@ export default function AnalyzePage() {
     const newId = uuidv4();
     const newTab: Tab = {
       id: newId,
-      name: 'Untitled.ts',
-      language: 'TypeScript',
-      code: '// Paste your code here to analyze...',
+      name: 'Untitled.py',
+      language: 'Python',
+      code: '# Paste your code here to analyze...',
       isDraft: true,
     };
     setTabs(prev => [...prev, newTab]);
@@ -150,7 +143,7 @@ export default function AnalyzePage() {
     try {
       setAnalyzing(true);
       
-      const langId = LANGUAGES.find(l => l.name === activeTab.language)?.id || 'typescript';
+      const langId = 'python';
 
       const { analysisId, uploadUrl } = await api.trpcMutation<{ analysisId: string; uploadUrl: string }>('analysis.create', {
         filename: activeTab.name,
@@ -259,7 +252,7 @@ export default function AnalyzePage() {
         {activeTab?.isDraft && (
           <div style={{ position: 'relative' }}>
             <select
-              value={LANGUAGES.find(l => l.name === activeTab.language)?.id || 'typescript'}
+              value="python"
               onChange={(e) => handleLanguageChange(e.target.value)}
               style={{
                 appearance: 'none',
